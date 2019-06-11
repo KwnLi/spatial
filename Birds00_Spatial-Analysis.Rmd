@@ -1,0 +1,333 @@
+---
+title: 'Birds 00: Spatial Analysis'
+author: "Arne Wenzel"
+date: "June 2019"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+---
+
+### Prerequisites
+
+```{r  message=FALSE, warning=FALSE}
+library(raster)
+library(rgdal)
+library(landscapemetrics)
+library(dplyr)
+library(vegan)
+library(tidyverse)
+library(berryFunctions)
+library(cowplot)
+library(ggplot2)
+```
+
+### Import raster
+
+The raster I import is a map of the entire Bangalore study region. It does contain both the north and the south transect. However, at the moment 2 of my sites fall outside of the classification.
+
+```{r results='hide'}
+bgl <- raster(readGDAL("sentinel_reclassified_2.tif"))
+```
+
+For later use I also need to specify the land use classes in the raster
+
+```{r}
+classes <- c("grey", "green" ,"crop", "fallow", "barren", "water")
+```
+
+### Import site locations
+
+I will build up the points from scratch, since I had issues while trying to directly import shape files from QGIS. 
+
+All the information I need is within my "site_info.txt" file. All site related information are stored inside (location, ids, name, etc.). I use a classical data.frame and set the site_ids as rownames, this works better with the spatial packages than a tidy workflow.  
+
+```{r results='hide', message=FALSE}
+site_info <- read.delim("20190515_site_infos.csv")
+rownames(site_info) = site_info$site_id
+```
+
+Next I create my spatial point data frame. For that I need to merge the point coordinates with some additional point data (like the name, transect, area). Furthermore I have to specify the Coordinate system (WGS84 /UTM zone 43n).
+
+```{r}
+CountPts <- SpatialPointsDataFrame(site_info[, 9:10], # the coordinates
+                                   site_info[, 1:6], # the data
+                                   proj4string = CRS(
+                                     "+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs+ellps=WGS84+towgs84=0,0,0")) # coordinate system
+                                     
+```
+
+### Plot raster and points
+
+Just as a rough overview I want to plot the raster and my site locations. The resulting map is very small - but nevertheless you can clearly see the north and the south transect. Note the two sites in the south which are outside the transects eastern boundary.
+
+```{r}
+plot(bgl)
+points(CountPts)
+```
+
+
+### Create buffers
+
+I want to analyse the landscape around my sites within circular buffers of different radii. To do that I first have to create the buffer polygons. I will use radii of 100, 500, 1000 and 1500 m around the site points. Since some buffers overlap I have to specfiy `dissolve = FALSE`.
+
+```{r}
+# Create buffer polygons
+bf100_ply   <- buffer(CountPts, width = 100, dissolve = F)
+bf500_ply   <- buffer(CountPts, width = 500, dissolve = F)
+bf1000_ply  <- buffer(CountPts, width = 1000, dissolve = F)
+bf1500_ply  <- buffer(CountPts, width = 1500, dissolve = F)
+```
+
+Next I can use the created polygons to clip the large landscape raster. Basicially, I end up with 36 little landscapes for each of my 4 buffer distances. They are saved in a list object.
+
+```{r warning=FALSE}
+# Cut raster by buffers
+bf100_ras <- list()
+for(i in 1:36) {
+  bf100_ras[i] <- crop(bgl, bf100_ply[i,])
+  bf100_ras[i] <- mask(bf100_ras[[i]], bf100_ply[i,])
+}
+
+
+bf500_ras <- list()
+for(i in 1:36) {
+  bf500_ras[i] <- crop(bgl, bf500_ply[i,])
+  bf500_ras[i] <- mask(bf500_ras[[i]], bf500_ply[i,])
+}
+
+bf1000_ras <- list()
+for(i in 1:36) {
+  bf1000_ras[i] <- crop(bgl, bf1000_ply[i,])
+  bf1000_ras[i] <- mask(bf1000_ras[[i]], bf1000_ply[i,])
+}
+
+bf1500_ras <- list()
+for(i in 1:36) {
+  bf1500_ras[i] <- crop(bgl, bf1500_ply[i,])
+  bf1500_ras[i] <- mask(bf1500_ras[[i]], bf1500_ply[i,])
+}
+```
+
+Finally, I still have to specify the names of my 36 little landscapes - the site-ids, of course.
+
+```{r}
+# Set the names of the rasters in the list (my site ids)
+names(bf100_ras)  = CountPts@data$site_id
+names(bf500_ras)  = CountPts@data$site_id
+names(bf1000_ras) = CountPts@data$site_id
+names(bf1500_ras) = CountPts@data$site_id
+```
+
+Ok, just out of fun (and to get an impression): let us plot the first 4 of my little 36 landscapes for the 500 m radius buffers. If I want I could also change the colors to something more appropriate, but I just go with the default for now.
+
+```{r}
+plot(bf500_ras[[1]])
+plot(bf500_ras[[2]])
+plot(bf500_ras[[3]])
+plot(bf500_ras[[4]])
+```
+
+### Extract spatial data
+
+Now I have to extract the "data" from my 36 little landscape. Basically I want to now how many pixels (size is 10 x 10 m) belong to each landuse class. With that I can later claculate proportional cover. I can do that with the `extract()` function from the raster package. Note that there is another `extract()` in the tidyr package. 
+
+```{r}
+# Extract all pixel values of the raster within buffers around sites/points
+bf100_px  <- raster::extract(bgl, CountPts, buffer = 100)
+bf500_px  <- raster::extract(bgl, CountPts, buffer = 500)
+bf1000_px <- raster::extract(bgl, CountPts, buffer = 1000)
+bf1500_px <- raster::extract(bgl, CountPts, buffer = 1500)
+```
+
+#### Pixel counts per class
+
+Now I have all the raw pixel values. But I want to count them for each class seperatetly and get a table with the result. For this I set up two functions (following some code I got from Kevin Li). The first function counts the pixel per class and the second takes the results and put them into a table. Both functions need the lapply() command to work, since the previous spatial objects I created are list objects. I will use these functions in the next steps. Note that these functions do not return a tibble but a matrix.
+
+```{r}
+# Function: Counts the pixels per class per buffer (needs lapply() to work)
+count_class_px <- function(raster_values) {
+  levels = 1:length(classes)
+  px <- c()
+  for(i in 1:length(levels)) {
+    px[i] <- sum(raster_values == levels[i], na.rm = T)  
+  }
+  names(px) = classes
+  return(px)
+}
+
+# Function: table of class pixel counts
+table_class_count <- function(raster_values) {
+  px_list <- lapply(raster_values,count_class_px )
+  px_mat <- matrix(unlist(px_list), nrow = length(px_list), byrow = T)
+  dimnames(px_mat) = list(CountPts@data$site_id, names(px_list[[1]]))
+  return(px_mat)
+}
+```
+
+#### Proportional cover per class
+
+Next tobasic pixel counts I also want to have the proportions of each class. For this I slightly tweak the functions above.
+
+```{r}
+# Function: Percentage of each class per buffer (needs lapply() to work)
+perc_class_px <- function(raster_values) {
+  levels = 1:length(classes)
+  px <- c()
+  for(i in 1:length(levels)) {
+    px[i] <- sum(raster_values == levels[i], na.rm = T)  
+  }
+  perc_px <- 100 * px / (sum(px))
+  names(perc_px) = classes
+  return(perc_px)
+}
+
+# Function: table of class percentages
+table_class_perc <- function(raster_values) {
+  perc_list <- lapply(raster_values, perc_class_px)
+  perc_mat <- matrix(unlist(perc_list), nrow = length(perc_list), byrow = T)
+  dimnames(perc_mat) = list(CountPts@data$site_id, names(perc_list[[1]]))
+  return(perc_mat)
+}
+```
+
+### Landscape composition
+
+Ok great, with the above functions I can now calculate the landscape compositon, i.e. the proportional share of each landuse class per indiviual buffer/radius.
+
+```{r}
+composition <- cbind(
+  table_class_perc(bf100_px),
+  table_class_perc(bf500_px),
+  table_class_perc(bf1000_px),
+  table_class_perc(bf1500_px)
+)
+
+colnames(composition) = c(
+  paste(classes, rep("_100",5), sep = ""),
+  paste(classes, rep("_500",5), sep = ""),
+  paste(classes, rep("_1000",5), sep = ""),
+  paste(classes, rep("_1500",5), sep = "")
+)
+
+head(composition)
+```
+
+### Landscape diversity
+
+To calculate landscape diversity indicies I use the `diversity()` function of the vegan package. This function needs to be called on a community matrix with sites as rows and the counts of the landuse classes in the columns. Now, I can use the pixel count function `table_class_count()` I created above.
+
+```{r}
+diversity <- cbind(diversity(table_class_count(bf100_px)),
+                   diversity(table_class_count(bf100_px), "simpson"),
+                   diversity(table_class_count(bf500_px)),
+                   diversity(table_class_count(bf500_px), "simpson"),
+                   diversity(table_class_count(bf1000_px)),
+                   diversity(table_class_count(bf1000_px), "simpson"),
+                   diversity(table_class_count(bf1500_px)),
+                   diversity(table_class_count(bf1500_px), "simpson"))
+                   
+colnames(diversity) = paste(rep(c("shannon", "simpsons"),4), 
+                           c("_100","_100", "_500", "_500","_1000","_1000",
+                             "_1500", "_1500"), sep ="")
+
+head(diversity)
+```
+
+### Landscape configuration
+
+For the landscape configuration metrics I use functions of the landscapemetrics package. These functions return a tibble and the calculated values are found in the last column (...$value). All metrics work on the landscape level, so they return one value for each of my sites/landscape. See the corresponding help pages for the used function for a detailed discription of each of the metrics.
+
+But before I can start I need to omit the two sites for which I still miss the landscape data. The landscapemetric package does not like NAs.
+
+```{r}
+bf100_ras[c(9:10)]  <- NULL
+bf500_ras[c(9:10)]  <- NULL
+bf1000_ras[c(9:10)] <- NULL
+bf1500_ras[c(9:10)] <- NULL
+```
+
+```{r}
+configuration <- tibble(
+  mn_p_area_100  = lsm_l_area_mn(bf100_ras)$value, # mean patch area
+  mn_p_area_500  = lsm_l_area_mn(bf500_ras)$value,
+  mn_p_area_1000 = lsm_l_area_mn(bf1000_ras)$value,
+  mn_p_area_1500 = lsm_l_area_mn(bf1500_ras)$value,
+  mn_para_100  = lsm_l_para_mn(bf100_ras)$value, # mn paraemter-to-area-ratio
+  mn_para_500  = lsm_l_para_mn(bf500_ras)$value,
+  mn_para_1000 = lsm_l_para_mn(bf1000_ras)$value,
+  mn_para_1500 = lsm_l_para_mn(bf1500_ras)$value,
+  mn_shp_100  = lsm_l_shape_mn(bf100_ras)$value, # mn shape index
+  mn_shp_500  = lsm_l_shape_mn(bf500_ras)$value,
+  mn_shp_1000 = lsm_l_shape_mn(bf1000_ras)$value,
+  mn_shp_1500 = lsm_l_shape_mn(bf1500_ras)$value,
+  edge_den_100  = lsm_l_ed(bf100_ras)$value, # edge density
+  edge_den_500  = lsm_l_ed(bf500_ras)$value,
+  edge_den_1000 = lsm_l_ed(bf1000_ras)$value,
+  edge_den_1500 = lsm_l_ed(bf1500_ras)$value,
+  patch_den_100  = lsm_l_pd(bf100_ras)$value, # patch density
+  patch_den_500  = lsm_l_pd(bf500_ras)$value,
+  patch_den_1000 = lsm_l_pd(bf1000_ras)$value,
+  patch_den_1500 = lsm_l_pd(bf1500_ras)$value,
+  no_patches_100 = lsm_l_np(bf100_ras)$value, # number of patches
+  no_patches_500 = lsm_l_np(bf500_ras)$value,
+  no_patches_1000 = lsm_l_np(bf1000_ras)$value,
+  no_patches_1500 = lsm_l_np(bf1500_ras)$value
+)
+
+head(configuration)
+```
+
+In order to have the same number of rows as the other results (to merge them later) I need to re-add the two missing sites as empty rows.
+
+```{r}
+# Insert 2 empty rows at positon 9 and 10; I deleted them earlier
+configuration <- insertRows(configuration, c(9,10))
+```
+
+### Distance to a central point
+
+Since my sites are along an urbanization gradient I would like to now how far they are away from a central point within the city. I specified this point via Qgis. I choose the "Anil Kumble Circle" on the "MG road" as central point. 
+
+```{r results='hide'}
+centralP <- readOGR(dsn="P:/Science/Projekte/Bangalore/GIS/raw_data","central_point")
+```
+
+I want to get a distance matrix which list the distance from all sites. Kevin Li quickly came up with the following function.
+
+```{r}
+disMat <- function(center,points){
+  difx <- points[, 1] - center[, 1] # difference in x
+  dify <- points[, 2] - center[, 2] # difference in y
+  c2   <- apply(cbind(difx, dify), 1, function(r) sqrt(r[1]^2 + r[2]^2))  # apply Pythagorean theorem
+  return(c2)
+}
+```
+
+Now it is super simple to calculate the distance matrix. I also devide by 1000 to get the distances in km.
+
+```{r}
+distance <- disMat(centralP@coords, CountPts@coords) / 1000
+distance
+```
+
+### Create the final output table
+
+Alright, now I can combine all my results/functions into a final table. This table has 36 rows for each of my sites.
+
+```{r}
+output <- cbind(
+  site_id = site_info$site_id,
+  distance,
+  composition, 
+  configuration,
+  diversity)
+```
+
+Lastly, I can export my output table. I use the R's own .rds formart, which I find easy to work with. csv files tend to have issues when imported (i.e. numbers to factors)
+
+```{r}
+write_rds(output, "birds_landscape.rds")
+```
+
+All done! Hurray!
