@@ -3,9 +3,9 @@ title: 'Birds 00: Spatial Analysis'
 author: "Arne Wenzel"
 date: "June 2019"
 output:
-  html_notebook:
+  html_document:
+    df_print: paged
     toc: yes
-    toc_float: yes
 ---
 
 ### Prerequisites
@@ -40,10 +40,10 @@ classes <- c("grey", "green" ,"crop", "fallow", "barren", "water")
 
 I will build up the points from scratch, since I had issues while trying to directly import shape files from QGIS. 
 
-All the information I need is within my "site_info.txt" file. All site related information are stored inside (location, ids, name, etc.). I use a classical data.frame and set the site_ids as rownames, this works better with the spatial packages than a tidy workflow.  
+All the information I need is within my "site_info.csv" file. All site related information are stored inside (location, ids, name, etc.). I use a classical data.frame and set the site_ids as rownames, this works better with the spatial packages than a tidy workflow.  
 
 ```{r results='hide', message=FALSE}
-site_info <- read.delim("20190515_site_infos.csv")
+site_info <- read.csv("20190515_site_infos.csv", sep = ";",dec=".")
 rownames(site_info) = site_info$site_id
 ```
 
@@ -130,7 +130,7 @@ plot(bf500_ras[[4]])
 
 ### Extract spatial data
 
-Now I have to extract the "data" from my 36 little landscape. Basically I want to now how many pixels (size is 10 x 10 m) belong to each landuse class. With that I can later claculate proportional cover. I can do that with the `extract()` function from the raster package. Note that there is another `extract()` in the tidyr package. 
+Now I have to extract the "data" from my 36 little landscape. Basically I want to know how many pixels (size is 10 x 10 m) belong to each landuse class. With that I can later calculate proportional cover. I can do that with the `extract()` function from the raster package. Note that there is another `extract()` in the tidyr package. 
 
 ```{r}
 # Extract all pixel values of the raster within buffers around sites/points
@@ -167,7 +167,7 @@ table_class_count <- function(raster_values) {
 
 #### Proportional cover per class
 
-Next tobasic pixel counts I also want to have the proportions of each class. For this I slightly tweak the functions above.
+Next to get basic pixel counts I also want to have the proportions of each class. For this I slightly tweak the functions above.
 
 ```{r}
 # Function: Percentage of each class per buffer (needs lapply() to work)
@@ -287,10 +287,10 @@ configuration <- insertRows(configuration, c(9,10))
 
 ### Distance to a central point
 
-Since my sites are along an urbanization gradient I would like to now how far they are away from a central point within the city. I specified this point via Qgis. I choose the "Anil Kumble Circle" on the "MG road" as central point. 
+Since my sites are along an urbanization gradient I would like to know how far they are away from a central point within the city. I specified this point via Qgis. I choose the "Anil Kumble Circle" on the "MG road" as central point. 
 
 ```{r results='hide'}
-centralP <- readOGR(dsn="P:/Science/Projekte/Bangalore/GIS/raw_data","central_point")
+centralP <- readOGR(dsn=".","central_point")
 ```
 
 I want to get a distance matrix which list the distance from all sites. Kevin Li quickly came up with the following function.
@@ -304,7 +304,7 @@ disMat <- function(center,points){
 }
 ```
 
-Now it is super simple to calculate the distance matrix. I also devide by 1000 to get the distances in km.
+Now it is super simple to calculate the distance matrix. I also divide by 1000 to get the distances in km.
 
 ```{r}
 distance <- disMat(centralP@coords, CountPts@coords) / 1000
@@ -324,7 +324,7 @@ output <- cbind(
   diversity)
 ```
 
-Lastly, I can export my output table. I use the R's own .rds formart, which I find easy to work with. csv files tend to have issues when imported (i.e. numbers to factors)
+Lastly, I can export my output table. I use R's own .rds formart, which I find easy to work with. csv files tend to have issues when imported (i.e. numbers to factors)
 
 ```{r}
 write_rds(output, "birds_landscape.rds")
