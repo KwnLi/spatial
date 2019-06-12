@@ -10,6 +10,8 @@ output:
 
 ### Prerequisites
 
+[Data download link](https://github.com/KwnLi/spatial/blob/master/Data.zip?raw=true)
+
 ```{r  message=FALSE, warning=FALSE}
 library(raster)
 library(rgdal)
